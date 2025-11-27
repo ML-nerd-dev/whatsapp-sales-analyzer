@@ -1,0 +1,82 @@
+# app.py
+import streamlit as st
+import pandas as pd
+import re
+from datetime import datetime
+import plotly.express as px
+
+st.set_page_config(page_title="WhatsApp Sales Analyzer", layout="wide", page_icon="speech_balloon")
+
+st.title("WhatsApp Sales Chat Analyzer")
+st.markdown("### Turn your WhatsApp business chats into money insights — Kenyan style")
+
+# Upload
+uploaded = st.file_uploader("Upload your WhatsApp chat (.txt)", type=["txt"])
+
+if uploaded:
+    raw = uploaded.read().decode("utf-8")
+else:
+    with open("sample_chat.txt", encoding="utf-8") as f:
+        raw = f.read()
+    st.info("Demo mode — analyzing real Kenyan business chat (electronics shop)")
+
+# Parse WhatsApp format
+def parse_chat(text):
+    pattern = r'(\d{1,2}/\d{1,2}/\d{2,4}, \d{1,2}:\d{2}\s?[AP]M) - ([^:]+): (.*)'
+    matches = re.findall(pattern, text)
+    df = pd.DataFrame(matches, columns=['timestamp', 'sender', 'message'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='%d/%m/%Y, %I:%M %p', errors='coerce')
+    df = df.dropna()
+    return df
+
+df = parse_chat(raw)
+
+# Extract sales (customize these keywords for your client)
+sale_keywords = ["paid", "lipa", "mpesa", "m-pesa", "sent", "received", "ksh", "kes", "sh", "thanks for paying", "order confirmed"]
+product_keywords = ["iphone", "samsung", "charger", "case", "airpods", "screen", "battery", "watch"]
+
+def extract_amount(msg):
+    amounts = re.findall(r'\b(KES|Ksh|Sh)?\s?[\d,]+\b', msg, re.IGNORECASE)
+    for a in amounts:
+        num = re.sub(r'[^0-9]', '', a)
+        if num and 100 <= int(num) <= 200000:
+            return int(num)
+    return None
+
+df['amount'] = df['message'].apply(extract_amount)
+df['is_sale'] = df['message'].str.contains('|'.join(sale_keywords), case=False)
+df['product'] = df['message'].str.extract(f"({'|'.join(product_keywords)})", flags=re.IGNORECASE)[0]
+
+sales = df[df['is_sale'] & df['amount'].notna()].copy()
+
+# Dashboard
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Sales Detected", f"KSh {sales['amount'].sum():,}")
+col2.metric("Orders", len(sales))
+col3.metric("Average Order", f"KSh {sales['amount'].mean():,.0f}")
+col4.metric("Top Customer", sales['sender'].mode()[0] if not sales.empty else "—")
+
+# Charts
+if not sales.empty:
+    col1, col2 = st.columns(2)
+    with col1:
+        daily = sales.groupby(sales['timestamp'].dt.date)['amount'].sum()
+        fig = px.bar(x=daily.index, y=daily.values, labels={'x': 'Date', 'y': 'Revenue (KSh)'},
+                     title="Daily Revenue")
+        fig.update_layout(template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        top_products = sales['product'].value_counts().head(10)
+        fig2 = px.pie(values=top_products.values, names=top_products.index, title="Top Selling Products")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # Best times
+    sales['hour'] = sales['timestamp'].dt.hour
+    hourly = sales.groupby('hour')['amount'].sum()
+    st.subheader("Best Selling Hours")
+    st.bar_chart(hourly)
+
+st.download_button("Download Sales Report", sales.to_csv(index=False), "sales_report.csv")
+
+st.success("Ready for clients! Charge KSh 50k–150k to run this on their chats")
